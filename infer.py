@@ -10,6 +10,10 @@ from src.models.dataset import preprocess_video_frame, tensor_to_uint8_image
 from src.models.predictor import load_model, predict_tensor, is_anomaly
 
 
+VIDEO_EXTENSIONS = {".avi", ".mp4", ".mov", ".mkv", ".wmv"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run anomaly inference on video or frame folder"
@@ -19,7 +23,7 @@ def parse_args():
         "--input",
         type=str,
         required=True,
-        help="Input video path or folder of frames.",
+        help="Input video path or folder of frames/videos.",
     )
 
     parser.add_argument(
@@ -60,7 +64,12 @@ def parse_args():
 
 
 def read_frames_from_video(video_path: str) -> List[np.ndarray]:
-    cap = cv2.VideoCapture(video_path)
+    video_path = Path(video_path)
+
+    if not video_path.exists():
+        raise FileNotFoundError(f"Video not found: {video_path}")
+
+    cap = cv2.VideoCapture(str(video_path))
 
     if not cap.isOpened():
         raise FileNotFoundError(f"Cannot open video: {video_path}")
@@ -83,16 +92,15 @@ def read_frames_from_video(video_path: str) -> List[np.ndarray]:
     return frames
 
 
-def read_frames_from_folder(folder_path: str) -> List[np.ndarray]:
+def read_frames_from_image_folder(folder_path: str) -> List[np.ndarray]:
     folder = Path(folder_path)
 
     if not folder.exists():
         raise FileNotFoundError(f"Input folder not found: {folder_path}")
 
-    image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
     image_paths = sorted(
         p for p in folder.rglob("*")
-        if p.is_file() and p.suffix.lower() in image_extensions
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
     )
 
     if len(image_paths) == 0:
@@ -112,26 +120,127 @@ def read_frames_from_folder(folder_path: str) -> List[np.ndarray]:
     return frames
 
 
+def read_frames_from_video_folder(folder_path: str) -> List[np.ndarray]:
+    folder = Path(folder_path)
+
+    if not folder.exists():
+        raise FileNotFoundError(f"Input folder not found: {folder_path}")
+
+    video_paths = sorted(
+        p for p in folder.rglob("*")
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+    )
+
+    if len(video_paths) == 0:
+        raise ValueError(f"No video files found in folder: {folder_path}")
+
+    all_frames = []
+
+    for video_path in video_paths:
+        print(f"Reading video: {video_path}")
+        frames = read_frames_from_video(str(video_path))
+        all_frames.extend(frames)
+
+    if len(all_frames) == 0:
+        raise ValueError(f"No frames loaded from video folder: {folder_path}")
+
+    return all_frames
+
+
 def load_input_frames(input_path: str) -> List[np.ndarray]:
     path = Path(input_path)
 
-    if path.is_dir():
-        return read_frames_from_folder(input_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Input path not found: {input_path}")
 
-    return read_frames_from_video(input_path)
+    if path.is_file():
+        if path.suffix.lower() in VIDEO_EXTENSIONS:
+            return read_frames_from_video(str(path))
+
+        if path.suffix.lower() in IMAGE_EXTENSIONS:
+            image = cv2.imread(str(path))
+
+            if image is None:
+                raise ValueError(f"Cannot read image: {path}")
+
+            return [image]
+
+        raise ValueError(f"Unsupported input file type: {path.suffix}")
+
+    image_paths = sorted(
+        p for p in path.rglob("*")
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+    )
+
+    if len(image_paths) > 0:
+        return read_frames_from_image_folder(str(path))
+
+    video_paths = sorted(
+        p for p in path.rglob("*")
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+    )
+
+    if len(video_paths) > 0:
+        return read_frames_from_video_folder(str(path))
+
+    raise ValueError(
+        f"No supported images/videos found in: {input_path}\n"
+        f"Supported images: {IMAGE_EXTENSIONS}\n"
+        f"Supported videos: {VIDEO_EXTENSIONS}"
+    )
 
 
-def draw_anomaly_label(frame: np.ndarray, score: float, threshold: float, anomaly: bool) -> np.ndarray:
+def draw_anomaly_label(
+    frame: np.ndarray,
+    score: float,
+    threshold: float,
+    anomaly: bool,
+) -> np.ndarray:
     output = frame.copy()
 
-    label = f"Score: {score:.6f}"
-    status = "ANOMALY" if anomaly else "NORMAL"
+    label_score = f"Score: {score:.6f}"
+    label_threshold = f"Threshold: {threshold:.6f}"
+    label_status = "ANOMALY" if anomaly else "NORMAL"
 
     color = (0, 0, 255) if anomaly else (0, 255, 0)
 
-    cv2.rectangle(output, (10, 10), (360, 80), (0, 0, 0), thickness=-1)
-    cv2.putText(output, label, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-    cv2.putText(output, status, (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+    cv2.rectangle(
+        output,
+        (10, 10),
+        (430, 110),
+        (0, 0, 0),
+        thickness=-1,
+    )
+
+    cv2.putText(
+        output,
+        label_score,
+        (20, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        color,
+        2,
+    )
+
+    cv2.putText(
+        output,
+        label_threshold,
+        (20, 70),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        color,
+        2,
+    )
+
+    cv2.putText(
+        output,
+        label_status,
+        (20, 100),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        color,
+        2,
+    )
 
     if anomaly:
         cv2.rectangle(
@@ -151,7 +260,12 @@ def save_results_csv(results, csv_path: Path):
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["frame_index", "anomaly_score", "threshold", "is_anomaly"]
+            fieldnames=[
+                "frame_index",
+                "anomaly_score",
+                "threshold",
+                "is_anomaly",
+            ],
         )
 
         writer.writeheader()
@@ -160,6 +274,57 @@ def save_results_csv(results, csv_path: Path):
             writer.writerow(row)
 
     print(f"CSV saved to: {csv_path}")
+
+
+def save_score_plot(results, output_path: Path):
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib not installed. Skip score plot.")
+        return
+
+    frame_indexes = [row["frame_index"] for row in results]
+    scores = [row["anomaly_score"] for row in results]
+    thresholds = [row["threshold"] for row in results]
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(frame_indexes, scores, label="Anomaly score")
+    plt.plot(frame_indexes, thresholds, linestyle="--", label="Threshold")
+    plt.xlabel("Frame index")
+    plt.ylabel("Reconstruction error")
+    plt.title("Anomaly Score per Frame")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    print(f"Score plot saved to: {output_path}")
+
+
+def save_summary_txt(results, output_path: Path):
+    total_frames = len(results)
+    anomaly_count = sum(row["is_anomaly"] for row in results)
+    normal_count = total_frames - anomaly_count
+
+    scores = [row["anomaly_score"] for row in results]
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open("w", encoding="utf-8") as f:
+        f.write("Inference Summary\n")
+        f.write("=================\n")
+        f.write(f"Total frames   : {total_frames}\n")
+        f.write(f"Normal frames  : {normal_count}\n")
+        f.write(f"Anomaly frames : {anomaly_count}\n")
+        f.write(f"Min score      : {min(scores):.8f}\n")
+        f.write(f"Max score      : {max(scores):.8f}\n")
+        f.write(f"Mean score     : {float(np.mean(scores)):.8f}\n")
+        f.write(f"Std score      : {float(np.std(scores)):.8f}\n")
+        f.write(f"Threshold      : {results[0]['threshold']:.8f}\n")
+
+    print(f"Summary saved to: {output_path}")
 
 
 def run_inference(
@@ -176,27 +341,37 @@ def run_inference(
     model, img_size, device = load_model(model_path)
     frames = load_input_frames(input_path)
 
-    print(f"Device: {device}")
+    print("=" * 60)
+    print("Running Inference")
+    print("=" * 60)
+    print(f"Device       : {device}")
+    print(f"Input        : {input_path}")
+    print(f"Model        : {model_path}")
     print(f"Frames loaded: {len(frames)}")
-    print(f"Image size: {img_size}x{img_size}")
+    print(f"Image size   : {img_size}x{img_size}")
+    print("=" * 60)
 
     scores = []
     reconstructed_tensors = []
 
-    for frame in frames:
+    for index, frame in enumerate(frames):
         tensor = preprocess_video_frame(frame, img_size=img_size)
         score, reconstructed = predict_tensor(tensor, model, device)
 
         scores.append(score)
         reconstructed_tensors.append(reconstructed)
 
+        if (index + 1) % 100 == 0:
+            print(f"Processed {index + 1}/{len(frames)} frames")
+
     if threshold is None:
         threshold = float(np.percentile(scores, auto_threshold_percentile))
         print(
             f"Auto threshold = {threshold:.8f} "
-            f"percentile={auto_threshold_percentile}"
+            f"(percentile={auto_threshold_percentile})"
         )
     else:
+        threshold = float(threshold)
         print(f"Manual threshold = {threshold:.8f}")
 
     results = []
@@ -222,23 +397,52 @@ def run_inference(
         )
 
         if save_frames:
-            marked = draw_anomaly_label(frame, score, threshold, anomaly)
-            cv2.imwrite(str(marked_dir / f"frame_{index:05d}.jpg"), marked)
+            marked = draw_anomaly_label(
+                frame=frame,
+                score=score,
+                threshold=threshold,
+                anomaly=anomaly,
+            )
 
-            reconstructed_image = tensor_to_uint8_image(reconstructed_tensors[index])
+            cv2.imwrite(
+                str(marked_dir / f"frame_{index:05d}.jpg"),
+                marked,
+            )
+
+            reconstructed_image = tensor_to_uint8_image(
+                reconstructed_tensors[index]
+            )
+
             cv2.imwrite(
                 str(reconstructed_dir / f"reconstructed_{index:05d}.jpg"),
                 reconstructed_image,
             )
 
-    save_results_csv(results, output_dir / "anomaly_scores.csv")
+    save_results_csv(
+        results,
+        output_dir / "anomaly_scores.csv",
+    )
+
+    save_score_plot(
+        results,
+        output_dir / "anomaly_score_plot.png",
+    )
+
+    save_summary_txt(
+        results,
+        output_dir / "summary.txt",
+    )
 
     anomaly_count = sum(row["is_anomaly"] for row in results)
+    normal_count = len(results) - anomaly_count
 
+    print("=" * 60)
     print("Inference completed.")
-    print(f"Total frames: {len(results)}")
+    print(f"Total frames  : {len(results)}")
     print(f"Anomaly frames: {anomaly_count}")
-    print(f"Normal frames: {len(results) - anomaly_count}")
+    print(f"Normal frames : {normal_count}")
+    print(f"Output folder : {output_dir}")
+    print("=" * 60)
 
     return results
 

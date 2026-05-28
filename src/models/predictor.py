@@ -1,31 +1,53 @@
+from pathlib import Path
 import torch
 import torch.nn.functional as F
 from src.models.autoencoder import AutoEncoder
 
+
+def get_device():
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 def load_model(model_path="outputs/model.pth"):
     """
-    Load pretrained AutoEncoder
+    Load AutoEncoder model from checkpoint.
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = AutoEncoder().to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
-    return model
+    model_path = Path(model_path)
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model not found: {model_path}")
 
-def predict(frame, model):
+    device = get_device()
+    checkpoint = torch.load(model_path, map_location=device)
+    img_size = checkpoint.get("img_size", 128)
+
+    model = AutoEncoder().to(device)
+    if "model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        model.load_state_dict(checkpoint)
+
+    model.eval()
+    return model, img_size, device
+
+
+def predict_tensor(frame_tensor, model, device):
     """
-    Predict anomaly score for a single frame
-    frame: torch tensor [1,H,W] or [1,1,H,W], normalized [0,1]
-    returns: anomaly_score (MSE loss), reconstructed frame
+    Input: tensor [1,H,W] or [1,1,H,W]
+    Output: MSE reconstruction loss + reconstructed tensor
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    if frame.dim() == 3:  # [1,H,W] -> [1,1,H,W]
-        frame = frame.unsqueeze(0)
-    frame = frame.to(device, dtype=torch.float)
+    if frame_tensor.dim() == 3:
+        frame_tensor = frame_tensor.unsqueeze(0)  # add batch dim
+    frame_tensor = frame_tensor.to(device, dtype=torch.float32)
 
     with torch.no_grad():
-        reconstructed = model(frame)
-        loss = F.mse_loss(reconstructed, frame)
-    
-    return loss.item(), reconstructed
+        reconstructed = model(frame_tensor)
+        score = F.mse_loss(reconstructed, frame_tensor, reduction="mean").item()
+
+    return score, reconstructed.cpu()
+
+
+def is_anomaly(score, threshold):
+    """
+    Determine if score > threshold
+    """
+    return score > threshold

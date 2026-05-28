@@ -57,3 +57,28 @@ class FrameDataset(Dataset):
         tensor = torch.from_numpy(image).unsqueeze(0)
 
         return tensor
+    
+def preprocess_video_frame(frame, img_size=128):
+    """
+    Resize và convert frame video sang tensor [1,H,W] normalized.
+    """
+    if frame is None:
+        raise ValueError("Input frame is None.")
+    if len(frame.shape) == 3:
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    frame = cv2.resize(frame, (img_size, img_size), interpolation=cv2.INTER_AREA)
+    frame = frame.astype(np.float32) / 255.0
+    tensor = torch.from_numpy(frame).unsqueeze(0)
+    return tensor
+
+def tensor_to_uint8_image(tensor):
+    """
+    Convert tensor [1,H,W] hoặc [1,1,H,W] sang uint8 image.
+    """
+    if tensor.dim() == 4:
+        tensor = tensor.squeeze(0)
+    if tensor.dim() == 3:
+        tensor = tensor.squeeze(0)
+    image = tensor.detach().cpu().numpy()
+    image = np.clip(image * 255.0, 0, 255).astype(np.uint8)
+    return image
