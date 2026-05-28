@@ -15,20 +15,7 @@ IMAGE_EXTENSIONS = {
     ".tiff",
 }
 
-
 class FrameDataset(Dataset):
-    """
-    Read all image frames from folder recursively.
-
-    Example:
-        dataset/train_all/
-            UCSDped1_Train/
-                Train001/
-                    001.tif
-            UCSDped2_Train/
-                Train001/
-                    001.tif
-    """
 
     def __init__(self, root_dir, img_size=128):
         self.root_dir = Path(root_dir)
