@@ -8,6 +8,8 @@ import numpy as np
 
 from src.models.dataset import preprocess_video_frame, tensor_to_uint8_image
 from src.models.predictor import load_model, predict_tensor, is_anomaly
+from src.evaluation.threshold import apply_threshold
+from src.evaluation.evaluator import evaluate_model
 
 
 VIDEO_EXTENSIONS = {".avi", ".mp4", ".mov", ".mkv", ".wmv"}
@@ -58,6 +60,13 @@ def parse_args():
         "--save_frames",
         action="store_true",
         help="Save reconstructed and marked anomaly frames.",
+    )
+
+    parser.add_argument(
+        "--labels_csv",
+        type=str,
+        default=None,
+        help="Optional CSV file with ground truth labels for evaluation. Columns: frame_index,label",
     )
 
     return parser.parse_args()
@@ -327,6 +336,27 @@ def save_summary_txt(results, output_path: Path):
     print(f"Summary saved to: {output_path}")
 
 
+def load_ground_truth_labels(labels_csv: str) -> dict:
+    path = Path(labels_csv)
+    if not path.exists():
+        raise FileNotFoundError(f"Labels CSV not found: {path}")
+
+    labels = {}
+    with path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        required = {"frame_index", "label"}
+        if not required.issubset(reader.fieldnames or []):
+            raise ValueError(
+                "Labels CSV must contain columns: frame_index,label"
+            )
+
+        for row in reader:
+            index = int(row["frame_index"])
+            labels[index] = int(row["label"])
+
+    return labels
+
+
 def run_inference(
     input_path: str,
     model_path: str,
@@ -334,6 +364,7 @@ def run_inference(
     threshold: Optional[float] = None,
     auto_threshold_percentile: float = 95.0,
     save_frames: bool = False,
+    labels_csv: Optional[str] = None,
 ):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -433,6 +464,29 @@ def run_inference(
         output_dir / "summary.txt",
     )
 
+    if labels_csv is not None:
+        ground_truth = load_ground_truth_labels(labels_csv)
+        y_true = []
+        y_scores = []
+        y_pred = []
+
+        for row in results:
+            idx = row["frame_index"]
+            if idx not in ground_truth:
+                continue
+            y_true.append(ground_truth[idx])
+            y_scores.append(row["anomaly_score"])
+            y_pred.append(int(is_anomaly(row["anomaly_score"], threshold)))
+
+        if len(y_true) == 0:
+            print("Warning: No matching ground truth labels found for evaluation.")
+        else:
+            evaluate_model(
+                np.array(y_true, dtype=int),
+                np.array(y_pred, dtype=int),
+                np.array(y_scores, dtype=float),
+            )
+
     anomaly_count = sum(row["is_anomaly"] for row in results)
     normal_count = len(results) - anomaly_count
 
@@ -457,6 +511,7 @@ def main():
         threshold=args.threshold,
         auto_threshold_percentile=args.auto_threshold_percentile,
         save_frames=args.save_frames,
+        labels_csv=args.labels_csv,
     )
 
 

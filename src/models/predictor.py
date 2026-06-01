@@ -13,8 +13,28 @@ def load_model(model_path="outputs/model.pth"):
     Load AutoEncoder model from checkpoint.
     """
     model_path = Path(model_path)
+
     if not model_path.exists():
-        raise FileNotFoundError(f"Model not found: {model_path}")
+        # Try common backup locations
+        search_dirs = [Path("."), Path("outputs")]
+        candidates = []
+
+        for directory in search_dirs:
+            if directory.exists():
+                candidates.extend(sorted(directory.rglob("*.pth")))
+
+        if candidates:
+            candidate_text = "\n".join(f"  - {p}" for p in candidates)
+            raise FileNotFoundError(
+                f"Model not found: {model_path}\n"
+                f"Found these candidate model files instead:\n{candidate_text}\n"
+                f"Please pass the correct --model_path or move the model checkpoint to {model_path}."
+            )
+
+        raise FileNotFoundError(
+            f"Model not found: {model_path}\n"
+            f"Please train the model first using: python train.py --save_path {model_path}"
+        )
 
     device = get_device()
     checkpoint = torch.load(model_path, map_location=device)
