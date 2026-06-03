@@ -1,17 +1,4 @@
-import cv2 
+from src.ui.dashboard import launch_ui
 
-video = cv2.VideoCapture("test.mp4")
-
-while True:
-    ret, frame = video.read()
-
-    if not ret:
-        break
-
-    cv2.imshow("Frame", frame)
-
-    if cv2.waitKey(1) == ord('q'):
-        break
-
-video.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    launch_ui()
