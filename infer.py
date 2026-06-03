@@ -1,341 +1,173 @@
 import argparse
-import csv
 from pathlib import Path
-from typing import List, Optional
-
 import cv2
 import numpy as np
-
+import torch
 from src.models.dataset import preprocess_video_frame, tensor_to_uint8_image
 from src.models.predictor import load_model, predict_tensor, is_anomaly
-from src.evaluation.threshold import apply_threshold
-from src.evaluation.evaluator import evaluate_model
 
-
-VIDEO_EXTENSIONS = {".avi", ".mp4", ".mov", ".mkv", ".wmv"}
+VIDEO_EXTENSIONS = {".avi", ".mp4", ".mov", ".mkv", ".wmv", ".flv", ".gif"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
-
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Run anomaly inference on video or frame folder"
-    )
-
-    parser.add_argument(
-        "--input",
-        type=str,
-        required=True,
-        help="Input video path or folder of frames/videos.",
-    )
-
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        default="outputs/model.pth",
-        help="Path to trained model.",
-    )
-
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="outputs/inference",
-        help="Folder to save inference results.",
-    )
-
-    parser.add_argument(
-        "--threshold",
-        type=float,
-        default=None,
-        help="Anomaly threshold. If not provided, auto threshold will be calculated.",
-    )
-
-    parser.add_argument(
-        "--auto_threshold_percentile",
-        type=float,
-        default=95.0,
-        help="Percentile used when threshold is not provided.",
-    )
-
-    parser.add_argument(
-        "--save_frames",
-        action="store_true",
-        help="Save reconstructed and marked anomaly frames.",
-    )
-
-    parser.add_argument(
-        "--labels_csv",
-        type=str,
-        default=None,
-        help="Optional CSV file with ground truth labels for evaluation. Columns: frame_index,label",
-    )
-
+    parser = argparse.ArgumentParser(description="Run anomaly inference on video or frame folder")
+    parser.add_argument("--input", type=str, required=True)
+    parser.add_argument("--model_path", type=str, default="outputs/model.pth")
+    parser.add_argument("--output_dir", type=str, default="outputs/inference")
+    parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument("--auto_threshold_percentile", type=float, default=95.0)
+    parser.add_argument("--save_frames", action="store_true")
+    parser.add_argument("--labels_csv", type=str, default=None)
     return parser.parse_args()
 
-
-def read_frames_from_video(video_path: str) -> List[np.ndarray]:
-    video_path = Path(video_path)
-
-    if not video_path.exists():
-        raise FileNotFoundError(f"Video not found: {video_path}")
-
-    cap = cv2.VideoCapture(str(video_path))
-
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open video: {video_path}")
-
-    frames = []
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frames.append(frame)
-
-    cap.release()
-
-    if len(frames) == 0:
-        raise ValueError(f"No frames found in video: {video_path}")
-
-    return frames
-
-
-def read_frames_from_image_folder(folder_path: str) -> List[np.ndarray]:
-    folder = Path(folder_path)
-
-    if not folder.exists():
-        raise FileNotFoundError(f"Input folder not found: {folder_path}")
-
-    image_paths = sorted(
-        p for p in folder.rglob("*")
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-    )
-
-    if len(image_paths) == 0:
-        raise ValueError(f"No image files found in folder: {folder_path}")
-
-    frames = []
-
-    for path in image_paths:
-        frame = cv2.imread(str(path))
-        if frame is not None:
-            frames.append(frame)
-
-    if len(frames) == 0:
-        raise ValueError(f"Cannot read images from folder: {folder_path}")
-
-    return frames
-
-
-def read_frames_from_video_folder(folder_path: str) -> List[np.ndarray]:
-    folder = Path(folder_path)
-
-    if not folder.exists():
-        raise FileNotFoundError(f"Input folder not found: {folder_path}")
-
-    video_paths = sorted(
-        p for p in folder.rglob("*")
-        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
-    )
-
-    if len(video_paths) == 0:
-        raise ValueError(f"No video files found in folder: {folder_path}")
-
-    all_frames = []
-
-    for video_path in video_paths:
-        print(f"Reading video: {video_path}")
-        frames = read_frames_from_video(str(video_path))
-        all_frames.extend(frames)
-
-    if len(all_frames) == 0:
-        raise ValueError(f"No frames loaded from video folder: {folder_path}")
-
-    return all_frames
-
-
-def load_input_frames(input_path: str) -> List[np.ndarray]:
+def load_frames(input_path: str):
     path = Path(input_path)
-
-    if not path.exists():
-        raise FileNotFoundError(f"Input path not found: {input_path}")
+    frames = []
 
     if path.is_file():
         if path.suffix.lower() in VIDEO_EXTENSIONS:
-            return read_frames_from_video(str(path))
+            cap = cv2.VideoCapture(str(path))
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frames.append(frame)
+            cap.release()
 
-        if path.suffix.lower() in IMAGE_EXTENSIONS:
-            image = cv2.imread(str(path))
-            if image is None:
-                raise ValueError(f"Cannot read image: {path}")
-            return [image]
+        elif path.suffix.lower() in IMAGE_EXTENSIONS:
+            frame = cv2.imread(str(path))
+            if frame is not None:
+                if frame.ndim == 2:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                frames.append(frame)
 
-        raise ValueError(f"Unsupported input file type: {path.suffix}")
+    elif path.is_dir():
+        image_files = sorted(p for p in path.rglob("*") if p.suffix.lower() in IMAGE_EXTENSIONS)
+        for f in image_files:
+            frame = cv2.imread(str(f))
+            if frame is not None:
+                if frame.ndim == 2:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                frames.append(frame)
 
-    image_paths = sorted(
-        p for p in path.rglob("*")
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-    )
+        video_files = sorted(p for p in path.rglob("*") if p.suffix.lower() in VIDEO_EXTENSIONS)
+        for vf in video_files:
+            cap = cv2.VideoCapture(str(vf))
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frames.append(frame)
+            cap.release()
 
-    if len(image_paths) > 0:
-        return read_frames_from_image_folder(str(path))
+    return frames
 
-    video_paths = sorted(
-        p for p in path.rglob("*")
-        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
-    )
+def prepare_reconstructed_array(reconstructed, frame):
+    reconstructed_np = reconstructed.detach().cpu().numpy()
 
-    if len(video_paths) > 0:
-        return read_frames_from_video_folder(str(path))
+    if reconstructed_np.ndim == 4:
+        reconstructed_np = reconstructed_np[0]
 
-    raise ValueError(
-        f"No supported images/videos found in: {input_path}\n"
-        f"Supported images: {IMAGE_EXTENSIONS}\n"
-        f"Supported videos: {VIDEO_EXTENSIONS}"
-    )
+    if reconstructed_np.ndim == 3:
+        if reconstructed_np.shape[0] in [1, 3] and reconstructed_np.shape[-1] not in [1, 3]:
+            reconstructed_np = np.transpose(reconstructed_np, (1, 2, 0))
 
+    if reconstructed_np.ndim == 2:
+        reconstructed_np = reconstructed_np[:, :, np.newaxis]
 
-def draw_anomaly_label(
-    frame: np.ndarray,
-    score: float,
-    threshold: float,
-    anomaly: bool,
-) -> np.ndarray:
+    if reconstructed_np.ndim == 1:
+        side = int(np.sqrt(reconstructed_np.shape[0]))
+        if side * side == reconstructed_np.shape[0]:
+            reconstructed_np = reconstructed_np.reshape(side, side, 1)
+        else:
+            reconstructed_np = np.resize(reconstructed_np, (frame.shape[0], frame.shape[1], 1))
+
+    if reconstructed_np.ndim != 3:
+        reconstructed_np = np.squeeze(reconstructed_np)
+        if reconstructed_np.ndim == 2:
+            reconstructed_np = reconstructed_np[:, :, np.newaxis]
+        else:
+            reconstructed_np = np.resize(reconstructed_np, (frame.shape[0], frame.shape[1], 1))
+
+    if reconstructed_np.shape[2] > 3:
+        reconstructed_np = np.mean(reconstructed_np, axis=2, keepdims=True)
+
+    reconstructed_np = cv2.resize(reconstructed_np, (frame.shape[1], frame.shape[0]))
+
+    if reconstructed_np.ndim == 2:
+        reconstructed_np = reconstructed_np[:, :, np.newaxis]
+
+    if frame.ndim == 3 and frame.shape[2] == 3 and reconstructed_np.ndim == 3 and reconstructed_np.shape[2] == 1:
+        reconstructed_np = np.repeat(reconstructed_np, 3, axis=2)
+
+    if frame.ndim == 3 and frame.shape[2] == 3 and reconstructed_np.ndim == 3 and reconstructed_np.shape[2] > 3:
+        reconstructed_np = reconstructed_np[:, :, :3]
+
+    return reconstructed_np.astype(np.float32)
+
+def draw_anomaly_label(frame: np.ndarray, anomaly_map: np.ndarray, score: float, threshold: float, anomaly: bool) -> np.ndarray:
     output = frame.copy()
-    label_score = f"Score: {score:.6f}"
-    label_threshold = f"Threshold: {threshold:.6f}"
-    label_status = "ANOMALY" if anomaly else "NORMAL"
     color = (0, 0, 255) if anomaly else (0, 255, 0)
 
-    cv2.rectangle(output, (10, 10), (430, 110), (0, 0, 0), thickness=-1)
-    cv2.putText(output, label_score, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-    cv2.putText(output, label_threshold, (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-    cv2.putText(output, label_status, (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-
     if anomaly:
-        cv2.rectangle(output, (5, 5), (output.shape[1] - 5, output.shape[0] - 5), (0, 0, 255), thickness=4)
+        if anomaly_map.ndim == 3:
+            heatmap = np.mean(anomaly_map, axis=2)
+        else:
+            heatmap = anomaly_map
+
+        heatmap = heatmap.astype(np.float32)
+        heatmap = cv2.GaussianBlur(heatmap, (9, 9), 0)
+        heatmap_norm = cv2.normalize(heatmap, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        pixel_threshold = np.percentile(heatmap_norm, 97)
+        _, thresh_img = cv2.threshold(heatmap_norm, pixel_threshold, 255, cv2.THRESH_BINARY)
+
+        kernel = np.ones((7, 7), np.uint8)
+        thresh_img = cv2.morphologyEx(thresh_img, cv2.MORPH_OPEN, kernel)
+        thresh_img = cv2.morphologyEx(thresh_img, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(thresh_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+
+            if area < 300:
+                continue
+
+            x, y, w, h = cv2.boundingRect(cnt)
+
+            if w < 15 or h < 15:
+                continue
+
+            cv2.rectangle(output, (x, y), (x + w, y + h), (0, 0, 255), 3)
+
+    cv2.rectangle(output, (10, 10), (430, 110), (0, 0, 0), -1)
+    cv2.putText(output, f"Score:{score:.6f}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+    cv2.putText(output, f"Threshold:{threshold:.6f}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+    cv2.putText(output, "ANOMALY" if anomaly else "NORMAL", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
     return output
-
-
-def save_results_csv(results, csv_path: Path):
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["frame_index", "anomaly_score", "threshold", "is_anomaly"])
-        writer.writeheader()
-        for row in results:
-            writer.writerow(row)
-    print(f"CSV saved to: {csv_path}")
-
-
-def save_score_plot(results, output_path: Path):
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("matplotlib not installed. Skip score plot.")
-        return
-
-    frame_indexes = [row["frame_index"] for row in results]
-    scores = [row["anomaly_score"] for row in results]
-    thresholds = [row["threshold"] for row in results]
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    plt.figure(figsize=(12, 5))
-    plt.plot(frame_indexes, scores, label="Anomaly score")
-    plt.plot(frame_indexes, thresholds, linestyle="--", label="Threshold")
-    plt.xlabel("Frame index")
-    plt.ylabel("Reconstruction error")
-    plt.title("Anomaly Score per Frame")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"Score plot saved to: {output_path}")
-
-
-def save_summary_txt(results, output_path: Path):
-    total_frames = len(results)
-    anomaly_count = sum(row["is_anomaly"] for row in results)
-    normal_count = total_frames - anomaly_count
-    scores = [row["anomaly_score"] for row in results]
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with output_path.open("w", encoding="utf-8") as f:
-        f.write("Inference Summary\n=================\n")
-        f.write(f"Total frames   : {total_frames}\n")
-        f.write(f"Normal frames  : {normal_count}\n")
-        f.write(f"Anomaly frames : {anomaly_count}\n")
-        f.write(f"Min score      : {min(scores):.8f}\n")
-        f.write(f"Max score      : {max(scores):.8f}\n")
-        f.write(f"Mean score     : {float(np.mean(scores)):.8f}\n")
-        f.write(f"Std score      : {float(np.std(scores)):.8f}\n")
-        f.write(f"Threshold      : {results[0]['threshold']:.8f}\n")
-
-    print(f"Summary saved to: {output_path}")
-
-
-def load_ground_truth_labels(labels_csv: str) -> dict:
-    path = Path(labels_csv)
-    if not path.exists():
-        raise FileNotFoundError(f"Labels CSV not found: {path}")
-
-    labels = {}
-    with path.open("r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        required = {"frame_index", "label"}
-        if not required.issubset(reader.fieldnames or []):
-            raise ValueError("Labels CSV must contain columns: frame_index,label")
-        for row in reader:
-            index = int(row["frame_index"])
-            labels[index] = int(row["label"])
-    return labels
-
-
-def run_inference(
-    input_path: str,
-    model_path: str,
-    output_dir: str,
-    threshold: Optional[float] = None,
-    auto_threshold_percentile: float = 95.0,
-    save_frames: bool = False,
-    labels_csv: Optional[str] = None,
-):
+def run_inference(input_path, model_path, output_dir, threshold=None, auto_threshold_percentile=95.0, save_frames=True):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model, img_size, device = load_model(model_path)
-    frames = load_input_frames(input_path)
+    frames = load_frames(input_path)
 
-    print("=" * 60)
-    print("Running Inference")
-    print("=" * 60)
-    print(f"Device       : {device}")
-    print(f"Input        : {input_path}")
-    print(f"Model        : {model_path}")
-    print(f"Frames loaded: {len(frames)}")
-    print(f"Image size   : {img_size}x{img_size}")
-    print("=" * 60)
+    if len(frames) == 0:
+        raise ValueError(f"No valid frames found in input: {input_path}")
 
     scores = []
     reconstructed_tensors = []
 
-    for index, frame in enumerate(frames):
+    for frame in frames:
         tensor = preprocess_video_frame(frame, img_size=img_size)
         score, reconstructed = predict_tensor(tensor, model, device)
-
-        scores.append(score)
+        scores.append(float(score))
         reconstructed_tensors.append(reconstructed)
-
-        if (index + 1) % 100 == 0:
-            print(f"Processed {index + 1}/{len(frames)} frames")
 
     if threshold is None:
         threshold = float(np.percentile(scores, auto_threshold_percentile))
-        print(f"Auto threshold = {threshold:.8f} (percentile={auto_threshold_percentile})")
-    else:
-        threshold = float(threshold)
-        print(f"Manual threshold = {threshold:.8f}")
 
     results = []
     marked_dir = output_dir / "marked_frames"
@@ -345,115 +177,80 @@ def run_inference(
         marked_dir.mkdir(parents=True, exist_ok=True)
         reconstructed_dir.mkdir(parents=True, exist_ok=True)
 
-    for index, frame in enumerate(frames):
-        score = scores[index]
+    for idx, frame in enumerate(frames):
+        score = scores[idx]
+        reconstructed = reconstructed_tensors[idx]
+        reconstructed_np = prepare_reconstructed_array(reconstructed, frame)
+
+        frame_float = frame.astype(np.float32) / 255.0
+
+        if reconstructed_np.max() > 1.0:
+            reconstructed_float = reconstructed_np / 255.0
+        else:
+            reconstructed_float = reconstructed_np
+
+        if frame_float.shape != reconstructed_float.shape:
+            if reconstructed_float.ndim == 2:
+                reconstructed_float = reconstructed_float[:, :, np.newaxis]
+            if frame_float.ndim == 3 and reconstructed_float.ndim == 3 and reconstructed_float.shape[2] == 1:
+                reconstructed_float = np.repeat(reconstructed_float, frame_float.shape[2], axis=2)
+            reconstructed_float = reconstructed_float[:, :, :frame_float.shape[2]]
+
+        anomaly_map = np.abs(frame_float - reconstructed_float)
         anomaly = is_anomaly(score, threshold)
 
         results.append({
-            "frame_index": index,
+            "frame_index": idx,
             "anomaly_score": score,
             "threshold": threshold,
-            "is_anomaly": int(anomaly),
+            "is_anomaly": int(anomaly)
         })
 
         if save_frames:
-            marked = draw_anomaly_label(frame=frame, score=score, threshold=threshold, anomaly=anomaly)
-            cv2.imwrite(str(marked_dir / f"frame_{index:05d}.jpg"), marked)
+            marked = draw_anomaly_label(frame, anomaly_map, score, threshold, anomaly)
+            cv2.imwrite(str(marked_dir / f"frame_{idx:05d}.jpg"), marked)
 
-            reconstructed_image = tensor_to_uint8_image(reconstructed_tensors[index])
-            cv2.imwrite(str(reconstructed_dir / f"reconstructed_{index:05d}.jpg"), reconstructed_image)
-
-    save_results_csv(results, output_dir / "anomaly_scores.csv")
-    save_score_plot(results, output_dir / "anomaly_score_plot.png")
-    save_summary_txt(results, output_dir / "summary.txt")
-
-    if labels_csv is not None:
-        ground_truth = load_ground_truth_labels(labels_csv)
-        y_true, y_scores, y_pred = [], [], []
-
-        for row in results:
-            idx = row["frame_index"]
-            if idx not in ground_truth:
-                continue
-            y_true.append(ground_truth[idx])
-            y_scores.append(row["anomaly_score"])
-            y_pred.append(int(is_anomaly(row["anomaly_score"], threshold)))
-
-        if len(y_true) == 0:
-            print("Warning: No matching ground truth labels found for evaluation.")
-        else:
-            evaluate_model(np.array(y_true, dtype=int), np.array(y_pred, dtype=int), np.array(y_scores, dtype=float))
-
-    anomaly_count = sum(row["is_anomaly"] for row in results)
-    normal_count = len(results) - anomaly_count
-
-    print("=" * 60)
-    print("Inference completed.")
-    print(f"Total frames  : {len(results)}")
-    print(f"Anomaly frames: {anomaly_count}")
-    print(f"Normal frames : {normal_count}")
-    print(f"Output folder : {output_dir}")
-    print("=" * 60)
+            reconstructed_img = tensor_to_uint8_image(reconstructed)
+            cv2.imwrite(str(reconstructed_dir / f"reconstructed_{idx:05d}.jpg"), reconstructed_img)
 
     return results
 
-
-def main():
-    args = parse_args()
-    run_inference(
-        input_path=args.input,
-        model_path=args.model_path,
-        output_dir=args.output_dir,
-        threshold=args.threshold,
-        auto_threshold_percentile=args.auto_threshold_percentile,
-        save_frames=args.save_frames,
-        labels_csv=args.labels_csv,
-    )
-
-
-if __name__ == "__main__":
-    main()
-
 def detect_anomalies(input_path):
-    """
-    Wrapper cho Streamlit UI:
-    - input_path: đường dẫn video
-    - Tự set model_path, output_dir, save_frames mặc định
-    - Trả về list [(frame, score)]
-    """
-    # Đường dẫn model mặc định
     model_path = "outputs/model.pth"
-    output_dir = "outputs/inference"
+    output_dir = Path("outputs/inference")
 
-    # Kiểm tra file tồn tại
-    from pathlib import Path
     path = Path(input_path)
+
     if not path.exists():
-        raise FileNotFoundError(f"Video file not found: {input_path}")
+        raise FileNotFoundError(f"File not found: {input_path}")
 
-    # Chạy inference
-    results_dict = run_inference(
-        input_path=input_path,
-        model_path=model_path,
-        output_dir=output_dir,
-        threshold=None,
-        auto_threshold_percentile=95.0,
-        save_frames=True,
-        labels_csv=None,
-    )
+    results = run_inference(input_path, model_path, output_dir)
 
-    # Chuyển sang format [(frame, score)] cho dashboard
-    import cv2
     frames = []
     scores = []
-    marked_dir = Path(output_dir) / "marked_frames"
-    for row in results_dict:
+    marked_dir = output_dir / "marked_frames"
+
+    for row in results:
         idx = row["frame_index"]
         score = row["anomaly_score"]
-        # Load frame đã đánh dấu nếu cần hiển thị
         frame_path = marked_dir / f"frame_{idx:05d}.jpg"
         frame = cv2.imread(str(frame_path))
         frames.append(frame)
         scores.append(score)
 
     return list(zip(frames, scores))
+
+def main():
+    args = parse_args()
+
+    run_inference(
+        input_path=args.input,
+        model_path=args.model_path,
+        output_dir=args.output_dir,
+        threshold=args.threshold,
+        auto_threshold_percentile=args.auto_threshold_percentile,
+        save_frames=args.save_frames
+    )
+
+if __name__ == "__main__":
+    main()
