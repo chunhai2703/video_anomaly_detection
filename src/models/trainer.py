@@ -20,13 +20,28 @@ def train_model(
     batch_size=32,
     learning_rate=0.001,
     num_workers=0,
+    checkpoint_every=10,
+    resume_path=None,
 ):
     device = get_device()
+
+    data_dir = Path(data_dir)
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    checkpoint_dir = save_path.parent / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = FrameDataset(
         root_dir=data_dir,
         img_size=img_size
     )
+
+    if len(dataset) == 0:
+        raise ValueError(
+            f"No training images found in: {data_dir}\n"
+            "Please make sure your dataset folder contains image files."
+        )
 
     loader = DataLoader(
         dataset,
@@ -39,6 +54,7 @@ def train_model(
     model = AutoEncoder().to(device)
 
     criterion = nn.MSELoss()
+
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=learning_rate
@@ -48,6 +64,40 @@ def train_model(
         "loss": []
     }
 
+    start_epoch = 1
+    best_loss = float("inf")
+
+    if resume_path is not None:
+        resume_path = Path(resume_path)
+
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+
+        print("=" * 60)
+        print(f"Loading checkpoint from: {resume_path}")
+        print("=" * 60)
+
+        checkpoint = torch.load(resume_path, map_location=device)
+
+        model.load_state_dict(checkpoint["model_state_dict"])
+
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+        if "history" in checkpoint:
+            history = checkpoint["history"]
+
+        if "epoch" in checkpoint:
+            start_epoch = checkpoint["epoch"] + 1
+
+        if "best_loss" in checkpoint:
+            best_loss = checkpoint["best_loss"]
+        elif "final_loss" in checkpoint:
+            best_loss = checkpoint["final_loss"]
+
+        print(f"Resume from epoch: {start_epoch}")
+        print(f"Best loss so far : {best_loss:.8f}")
+
     print("=" * 60)
     print("Training AutoEncoder")
     print("=" * 60)
@@ -56,11 +106,14 @@ def train_model(
     print(f"Training images : {len(dataset)}")
     print(f"Image size      : {img_size}x{img_size}")
     print(f"Epochs          : {epochs}")
+    print(f"Start epoch     : {start_epoch}")
     print(f"Batch size      : {batch_size}")
     print(f"Learning rate   : {learning_rate}")
+    print(f"Checkpoint every: {checkpoint_every} epoch(s)")
+    print(f"Save path       : {save_path}")
     print("=" * 60)
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         model.train()
 
         total_loss = 0.0
@@ -85,22 +138,67 @@ def train_model(
             f"Loss: {epoch_loss:.8f}"
         )
 
-    save_path = Path(save_path)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
+        if epoch_loss < best_loss:
+            best_loss = epoch_loss
 
-    checkpoint = {
+            best_checkpoint = {
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "img_size": img_size,
+                "epoch": epoch,
+                "epochs": epochs,
+                "batch_size": batch_size,
+                "learning_rate": learning_rate,
+                "best_loss": best_loss,
+                "final_loss": epoch_loss,
+                "history": history,
+            }
+
+            best_path = save_path.parent / "best_model.pth"
+            torch.save(best_checkpoint, best_path)
+
+            print(f"Best model saved to: {best_path}")
+
+        if checkpoint_every is not None and checkpoint_every > 0:
+            if epoch % checkpoint_every == 0:
+                checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch}.pth"
+
+                checkpoint = {
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "img_size": img_size,
+                    "epoch": epoch,
+                    "epochs": epochs,
+                    "batch_size": batch_size,
+                    "learning_rate": learning_rate,
+                    "best_loss": best_loss,
+                    "final_loss": epoch_loss,
+                    "history": history,
+                }
+
+                torch.save(checkpoint, checkpoint_path)
+
+                print(f"Checkpoint saved to: {checkpoint_path}")
+
+    final_checkpoint = {
         "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
         "img_size": img_size,
+        "epoch": epochs,
         "epochs": epochs,
         "batch_size": batch_size,
         "learning_rate": learning_rate,
+        "best_loss": best_loss,
         "final_loss": history["loss"][-1],
+        "history": history,
     }
 
-    torch.save(checkpoint, save_path)
+    torch.save(final_checkpoint, save_path)
 
     print("=" * 60)
-    print(f"Model saved to: {save_path}")
+    print(f"Final model saved to: {save_path}")
+    print(f"Best loss         : {best_loss:.8f}")
+    print(f"Final loss        : {history['loss'][-1]:.8f}")
     print("=" * 60)
 
     return history
