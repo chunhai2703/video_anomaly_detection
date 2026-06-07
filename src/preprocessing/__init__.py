@@ -1,27 +1,13 @@
-"""
-Preprocessing module for video anomaly detection
-"""
+"""Preprocessing public API."""
 
-from .video_loader import load_video, get_video_info, read_frames
-from .frame_extractor import extract_frames, extract_frames_batch, get_frame_at_index
-from .preprocessing import (
-    resize_frame,
-    grayscale,
-    normalize,
-    preprocess,
-    preprocess_batch
-)
+from .preprocessing import preprocess_batch, preprocess_frame, resize_keep_aspect
 
-__all__ = [
-    'load_video',
-    'get_video_info', 
-    'read_frames',
-    'extract_frames',
-    'extract_frames_batch',
-    'get_frame_at_index',
-    'resize_frame',
-    'grayscale',
-    'normalize',
-    'preprocess',
-    'preprocess_batch'
-]
+# Backward-compatible imports for older team scripts/tests.
+try:
+    from .video_loader import get_video_info, load_video
+    from .frame_extractor import extract_frames, save_frames
+except Exception:  # pragma: no cover
+    pass
+
+# Old code used `preprocess(...)`; keep it as an alias.
+preprocess = preprocess_frame

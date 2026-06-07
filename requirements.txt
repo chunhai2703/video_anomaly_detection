@@ -6,4 +6,5 @@ torchvision
 streamlit
 scikit-learn
 plotly
+pandas
 Pillow
