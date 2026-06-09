@@ -8,6 +8,12 @@ from typing import Tuple
 import torch
 
 from src.models.autoencoder import AutoEncoder
+from typing import List, Dict
+import numpy as np
+
+from src.preprocessing import preprocess_batch
+from src.optical_flow.motion_map import compute_motion_scores_for_sequence
+from src.evaluation.threshold import apply_threshold
 
 
 def configure_torch_threads(num_threads: int | None = None) -> None:
@@ -56,3 +62,50 @@ def predict_batch(batch: torch.Tensor, model: AutoEncoder, device: torch.device)
     recon = model(batch)
     scores = torch.mean((recon - batch) ** 2, dim=(1, 2, 3))
     return scores.detach().cpu(), recon.detach().cpu()
+
+
+def infer_frames(
+    frames: List[np.ndarray],
+    model: AutoEncoder,
+    img_size: int,
+    device: torch.device,
+    batch_size: int = 32,
+    threshold: float = 0.5,
+    alpha: float = 0.6,
+) -> Dict[str, np.ndarray]:
+    """
+    Run inference on a list of raw frames and return reconstruction scores,
+    motion scores, combined scores, and binary predictions.
+
+    - `frames`: list of BGR frames (numpy arrays)
+    - returns dict with keys: `recon_scores`, `motion_scores`, `combined_scores`, `predictions`
+    """
+    # Preprocess all frames into a tensor batch of shape (N, 1, H, W)
+    batches = []
+    N = len(frames)
+    recon_scores_list = []
+
+    # Process in minibatches
+    for i in range(0, N, batch_size):
+        batch_frames = frames[i : i + batch_size]
+        batch_tensor = preprocess_batch(batch_frames, img_size)
+        scores, _recon = predict_batch(batch_tensor, model, device)
+        recon_scores_list.append(scores.numpy())
+
+    recon_scores = np.concatenate(recon_scores_list, axis=0)
+
+    # Motion scores are computed on consecutive pairs; pad to match frame count
+    motion_pair_scores = compute_motion_scores_for_sequence(frames)
+    if len(motion_pair_scores) == 0:
+        motion_scores = np.zeros_like(recon_scores)
+    else:
+        motion_scores = np.concatenate([motion_pair_scores, motion_pair_scores[-1:]])
+
+    # Compute binary predictions using combined score (backward-compatible)
+    predictions = apply_threshold(recon_scores, threshold, motion_scores=motion_scores, alpha=alpha)
+
+    return {
+        "recon_scores": recon_scores,
+        "motion_scores": motion_scores,
+        "predictions": predictions,
+    }

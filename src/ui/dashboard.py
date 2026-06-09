@@ -41,7 +41,7 @@ def _show_frame_grid(rows: list[dict], max_items: int) -> None:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         label = "ANOMALY" if row["is_anomaly"] else "NORMAL"
         caption = f"Frame {row['frame_index']} · {label} · score {row['score']:.6f}"
-        cols[i % 4].image(img, caption=caption, use_container_width=True)
+        cols[i % 4].image(img, caption=caption, width='stretch')
 
 
 def launch_ui() -> None:
@@ -84,7 +84,7 @@ def launch_ui() -> None:
             if suffix.lstrip(".") in VIDEO_TYPES:
                 st.video(input_path)
             else:
-                st.image(input_path, use_container_width=True)
+                st.image(input_path, width='stretch')
 
         if not Path(model_path).exists():
             st.error(f"Không tìm thấy model: `{model_path}`")
@@ -133,7 +133,7 @@ def launch_ui() -> None:
             st.subheader("Anomaly score theo thời gian")
             fig = px.line(df, x="frame_index", y="score", markers=False)
             fig.add_hline(y=summary["threshold"], line_dash="dash", annotation_text="threshold")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig)
 
             st.subheader("Top anomaly frames")
             top_rows = sorted(rows, key=lambda r: r["score"], reverse=True)
@@ -142,7 +142,6 @@ def launch_ui() -> None:
             st.subheader("Bảng kết quả")
             st.dataframe(
                 df[["frame_index", "time_seconds", "score", "threshold", "is_anomaly", "frame_path"]],
-                use_container_width=True,
                 hide_index=True,
             )
 
